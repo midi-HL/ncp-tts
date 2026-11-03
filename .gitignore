@@ -1,0 +1,13 @@
+# build output
+/dist/
+/ncp-tts
+/ncp-tts.exe
+
+# editor / OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# local test artifacts
+*.mp3

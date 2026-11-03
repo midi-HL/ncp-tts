@@ -1,0 +1,98 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: vet + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test ./... -race -count=1
+
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: windows, goarch: amd64, ext: ".exe" }
+          - { goos: windows, goarch: "386", ext: ".exe" }
+          - { goos: linux,   goarch: amd64, ext: "" }
+          - { goos: linux,   goarch: "386", ext: "" }
+          - { goos: linux,   goarch: arm64, ext: "" }
+          - { goos: linux,   goarch: arm,   ext: "" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+      - name: build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          version="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then version="dev-${GITHUB_SHA::7}"; fi
+          out="ncp-tts-${GOOS}-${GOARCH}${{ matrix.ext }}"
+          go build -trimpath -ldflags "-s -w -X main.version=${version}" -o "dist/${out}" ./cmd/ncp-tts
+          ls -l "dist/${out}"
+      - name: smoke test binary (linux/amd64 only)
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: |
+          ./dist/ncp-tts-linux-amd64 --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ncp-tts-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: attach release assets
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*
+            dist/SHA256SUMS.txt
