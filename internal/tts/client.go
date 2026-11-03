@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -225,9 +224,6 @@ func (c *Client) streamOne(ctx context.Context, ssmlText string, cfg TTSConfig, 
 	audioSeen := false
 	for {
 		msgType, payload, err := conn.ReadMessage()
-		if debugFrames {
-			fmt.Printf("[dbg] type=%d len=%d head=%q\n", msgType, len(payload), firstN(payload, 120))
-		}
 		if err != nil {
 			if !audioSeen {
 				return 0, fmt.Errorf("no audio received: %w", err)
@@ -259,17 +255,6 @@ func (c *Client) streamOne(ctx context.Context, ssmlText string, cfg TTSConfig, 
 			// The first two bytes hold the big-endian length of the header
 			// block that follows; audio begins right after that block.
 			headerLen := int(binary.BigEndian.Uint16(payload[:2]))
-			if debugFrames && headerLen < len(payload) {
-				lo := headerLen - 8
-				if lo < 0 {
-					lo = 0
-				}
-				hi := headerLen + 8
-				if hi > len(payload) {
-					hi = len(payload)
-				}
-				fmt.Printf("[dbg] headerLen=%d region=%q\n", headerLen, payload[lo:hi])
-			}
 			headerEnd := 2 + headerLen
 			if headerEnd > len(payload) {
 				return chunkBytes, fmt.Errorf("binary frame header length out of range")
@@ -296,15 +281,6 @@ func (c *Client) streamOne(ctx context.Context, ssmlText string, cfg TTSConfig, 
 }
 
 // splitHeaderBlock separates a "Key:value\r\n...\r\n\r\nbody" frame.
-var debugFrames = os.Getenv("NCP_DEBUG_FRAMES") != ""
-
-func firstN(b []byte, n int) string {
-	if len(b) < n {
-		n = len(b)
-	}
-	return string(b[:n])
-}
-
 func splitHeaderBlock(payload []byte) (path string, body []byte, ok bool) {
 	idx := indexDoubleCRLF(payload)
 	if idx < 0 {
