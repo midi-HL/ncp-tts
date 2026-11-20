@@ -1,6 +1,6 @@
 # ncp-tts
 
-一个用 Go 写的 **MCP（Model Context Protocol）服务**，把文字变成语音，走微软 Edge 的神经网络音色（晓晓、云希、云健等 300+ 音色）。
+一个用 Go 写的文字转语音服务，使用微软 Edge 的神经网络音色（晓晓、云希、云健等 300+ 音色），同时支持 **MCP** 和 **OpenAI 兼容的 HTTP API**。
 
 **不需要 API Key，不需要注册 Azure，不需要绑卡。**
 
@@ -13,7 +13,7 @@
 - `tts_speak` —— 给一段文字，拿回一个 MP3 文件（或内联 base64）
 - `tts_list_voices` —— 查可用音色，可按 `zh-CN` 这类语言前缀过滤
 
-服务通过 **stdio** 通信，不监听端口、不需要网络配置，客户端拉起进程即可用。
+默认通过 **stdio** 提供 MCP 服务。需要让局域网内的设备调用时，用 `--listen` 启动 HTTP 模式。
 
 ---
 
@@ -32,7 +32,7 @@
 | Linux ARM64（树莓派 4/5、多数云主机） | `ncp-tts-linux-arm64` |
 | Linux ARM 32 位（老树莓派、路由器） | `ncp-tts-linux-arm` |
 
-单个文件，无依赖，不用装 Go、不用装 Python。
+下载的可执行文件可直接输出 MP3，不用装 Go 或 Python。HTTP 接口输出其他格式时需要 FFmpeg。
 
 ### 2. 先自检（确认网络通）
 
@@ -72,6 +72,74 @@ Windows 上 `command` 写 `.exe` 的绝对路径，路径用双反斜杠或正�
 
 ---
 
+## 在局域网使用 OpenAI 兼容 API
+
+在 Windows 上用 PowerShell 启动：
+
+```powershell
+.\ncp-tts-windows-amd64.exe --listen 0.0.0.0:8000
+```
+
+在 Linux 上启动：
+
+```bash
+./ncp-tts-linux-amd64 --listen 0.0.0.0:8000
+```
+
+客户端的 Base URL 填 `http://<运行服务的电脑的局域网 IP>:8000/v1`，同一台电脑也可以用 `http://127.0.0.1:8000/v1`。HTTP 接口不检查 API Key：可以省略 `Authorization`，客户端要求填 Key 时随便填一个非空值即可。只想在本机使用时，可监听 `127.0.0.1:8000`。
+
+`--listen` 启动的是独立的 HTTP 服务。若同时需要 MCP，由 MCP 客户端另起一个不带 `--listen` 的进程。
+
+| 接口 | 用途 |
+|---|---|
+| `GET /v1/models` | 列出 `edge-tts` 和兼容别名 `tts-1`，两者都使用同一个 Edge 后端 |
+| `GET /v1/models/{id}` | 查询指定模型 |
+| `GET /v1/voices` | 列出微软音色。可加 `?locale=zh-CN` 按语言前缀过滤；列表中的 `id` 就是合成时使用的音色名 |
+| `POST /v1/audio/speech` | 合成语音，响应正文为音频数据 |
+
+`/v1/voices` 是本项目扩展接口，返回带有 `object: "list"` 和 `data` 的 JSON 对象，每项音色包含 `id`、`object: "voice"`、`locale`、`gender` 和 `name`。
+
+`POST /v1/audio/speech` 接收以下 JSON 字段：
+
+| 字段 | 说明 |
+|---|---|
+| `model` | 必填，填 `edge-tts` 或 `tts-1` |
+| `input` | 必填，要朗读的文本，最多 4096 个字符 |
+| `voice` | 可省略，默认女声晓晓 `zh-CN-XiaoxiaoNeural`；可以传微软音色短名，也可以传 `alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`，这些别名均映射到微软音色 |
+| `speed` | 可省略，默认 `1.0`，范围 `0.25`–`4.0` |
+| `response_format` | 可省略，默认 `mp3`；服务端的 `PATH` 中有 FFmpeg 时，还可以选 `wav`、`opus`、`aac`、`flac`、`pcm` |
+| `stream_format` | 可省略，支持 `audio`（直接返回音频数据） |
+
+当前不支持 `instructions` 控制语气或 `stream_format: "sse"`。
+
+用 `curl` 列出模型和音色、合成一段语音（以下用 Bash 语法，省略 `voice` 会使用晓晓）：
+
+```bash
+curl -fsS http://127.0.0.1:8000/v1/models
+curl -fsS 'http://127.0.0.1:8000/v1/voices?locale=zh-CN'
+curl -fsS http://127.0.0.1:8000/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  --data '{"model":"edge-tts","input":"你好，这是晓晓的语音示例。"}' \
+  --output speech.mp3
+```
+
+用 OpenAI Python SDK 指定云希音色和语速：
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="local")
+with client.audio.speech.with_streaming_response.create(
+    model="edge-tts",
+    voice="zh-CN-YunxiNeural",
+    input="你好，这是云希的语音示例。",
+    speed=1.1,
+) as response:
+    response.stream_to_file("speech.mp3")
+```
+
+---
+
 ## 工具参数
 
 ### `tts_speak`
@@ -79,7 +147,7 @@ Windows 上 `command` 写 `.exe` 的绝对路径，路径用双反斜杠或正�
 | 参数 | 必填 | 说明 |
 |---|---|---|
 | `text` | ✅ | 要读的文字 |
-| `voice` | | 音色短名，如 `zh-CN-XiaoxiaoNeural`。默认 `en-US-EmmaMultilingualNeural` |
+| `voice` | | 微软音色短名。默认 `zh-CN-XiaoxiaoNeural`（晓晓） |
 | `rate` | | 语速增量，百分比，如 `+10%`、`-20%` |
 | `volume` | | 音量增量，百分比 |
 | `pitch` | | 音高增量，赫兹，如 `-20Hz` |

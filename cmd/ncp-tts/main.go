@@ -1,16 +1,20 @@
-// Command ncp-tts is a Model Context Protocol server that turns text into
-// speech using Microsoft Edge's neural voices.
+// Command ncp-tts serves Microsoft Edge neural voices over MCP or HTTP.
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/midi-HL/ncp-tts/internal/api"
 	"github.com/midi-HL/ncp-tts/internal/mcp"
 	"github.com/midi-HL/ncp-tts/internal/tts"
 )
@@ -23,6 +27,7 @@ func main() {
 		outDir      = flag.String("out", "", "directory for generated MP3 files (default: system temp)")
 		showVersion = flag.Bool("version", false, "print version and exit")
 		selfTest    = flag.Bool("selftest", false, "synthesize a short sample and exit")
+		listenAddr  = flag.String("listen", "", "serve the HTTP API on host:port instead of MCP (e.g. 0.0.0.0:8000)")
 	)
 	flag.Parse()
 
@@ -47,12 +52,52 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if *listenAddr != "" {
+		if err := serveHTTP(ctx, *listenAddr, client, logger); err != nil {
+			logger.Fatalf("serve HTTP: %v", err)
+		}
+		return
+	}
+
 	server := mcp.NewServer("ncp-tts", version, logger)
 	mcp.RegisterTools(server, &mcp.TTSHandler{Client: client, OutDir: *outDir})
 
 	logger.Printf("serving MCP over stdio (version %s)", version)
 	if err := server.Serve(ctx, os.Stdin, os.Stdout); err != nil {
 		logger.Fatalf("serve: %v", err)
+	}
+}
+
+func serveHTTP(ctx context.Context, addr string, client *tts.Client, logger *log.Logger) error {
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{
+		Handler:           api.NewHandler(client, logger),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      api.RequestTimeout + 30*time.Second,
+		IdleTimeout:       60 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
+	}
+	defer srv.Close()
+
+	stopped := make(chan error, 1)
+	go func() {
+		logger.Printf("serving HTTP API on %s (version %s)", listener.Addr(), version)
+		stopped <- srv.Serve(listener)
+	}()
+	select {
+	case err := <-stopped:
+		if !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return srv.Shutdown(shutdown)
 	}
 }
 

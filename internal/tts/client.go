@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -18,7 +19,7 @@ import (
 )
 
 // DefaultVoice is used when the caller does not pick one.
-const DefaultVoice = "en-US-EmmaMultilingualNeural"
+const DefaultVoice = "zh-CN-XiaoxiaoNeural"
 
 const (
 	baseURL          = "speech.platform.bing.com/consumer/speech/synthesize/readaloud"
@@ -88,9 +89,10 @@ type Client struct {
 	HTTPClient *http.Client
 	// Dialer connects the synthesis WebSocket; nil means a sensible default.
 	Dialer *websocket.Dialer
-	// ClockSkew is added to the local clock when minting tokens. The service
-	// returns 403 when the local clock drifts; callers can correct it.
+	// ClockSkew supplies the initial clock offset when minting tokens. Set it
+	// before using the client; the client can correct it from the server date.
 	ClockSkew time.Duration
+	clockMu   sync.RWMutex
 }
 
 // NewClient returns a Client with production defaults.
@@ -118,6 +120,10 @@ type Voice struct {
 
 // ListVoices fetches every voice the service exposes.
 func (c *Client) ListVoices(ctx context.Context) ([]Voice, error) {
+	return c.listVoices(ctx, true)
+}
+
+func (c *Client) listVoices(ctx context.Context, retry bool) ([]Voice, error) {
 	token := c.token()
 	url := voiceListURL + "?trustedclienttoken=" + drm.TrustedClientToken +
 		"&Sec-MS-GEC=" + token + "&Sec-MS-GEC-Version=" + secMSGECVersion
@@ -132,13 +138,14 @@ func (c *Client) ListVoices(ctx context.Context) ([]Voice, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list voices: %w", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusForbidden {
+	if retry && resp.StatusCode == http.StatusForbidden {
+		resp.Body.Close()
 		if err := c.adjustSkewFrom(resp); err != nil {
 			return nil, err
 		}
-		return c.ListVoices(ctx)
+		return c.listVoices(ctx, false)
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("list voices: unexpected status %d", resp.StatusCode)
 	}
@@ -194,24 +201,13 @@ func (c *Client) Synthesize(ctx context.Context, text string, cfg TTSConfig) (<-
 // streamOne performs a single WebSocket utterance and returns the audio byte
 // count so the caller can compensate timeline offsets across chunks.
 func (c *Client) streamOne(ctx context.Context, ssmlText string, cfg TTSConfig, out chan<- Chunk, priorBytes int64) (int64, error) {
-	url := wssURL + "?TrustedClientToken=" + drm.TrustedClientToken +
-		"&ConnectionId=" + connectID() +
-		"&Sec-MS-GEC=" + c.token() +
-		"&Sec-MS-GEC-Version=" + secMSGECVersion
-
-	headers := wsHeaders()
-	headers.Set("Cookie", "muid="+muid()+";")
-
-	conn, resp, err := c.dialer().DialContext(ctx, url, headers)
+	conn, err := c.dialSpeech(ctx, true)
 	if err != nil {
-		if resp != nil && resp.StatusCode == http.StatusForbidden {
-			if skewErr := c.adjustSkewFrom(resp); skewErr == nil {
-				return c.streamOne(ctx, ssmlText, cfg, out, priorBytes)
-			}
-		}
-		return 0, fmt.Errorf("websocket dial: %w", err)
+		return 0, err
 	}
 	defer conn.Close()
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
 
 	if err := conn.WriteMessage(websocket.TextMessage, []byte(cfg.speechConfig())); err != nil {
 		return 0, fmt.Errorf("send speech.config: %w", err)
@@ -225,6 +221,9 @@ func (c *Client) streamOne(ctx context.Context, ssmlText string, cfg TTSConfig, 
 	for {
 		msgType, payload, err := conn.ReadMessage()
 		if err != nil {
+			if ctx.Err() != nil {
+				return chunkBytes, ctx.Err()
+			}
 			if !audioSeen {
 				return 0, fmt.Errorf("no audio received: %w", err)
 			}
@@ -278,6 +277,31 @@ func (c *Client) streamOne(ctx context.Context, ssmlText string, cfg TTSConfig, 
 			}
 		}
 	}
+}
+
+func (c *Client) dialSpeech(ctx context.Context, retry bool) (*websocket.Conn, error) {
+	url := wssURL + "?TrustedClientToken=" + drm.TrustedClientToken +
+		"&ConnectionId=" + connectID() +
+		"&Sec-MS-GEC=" + c.token() +
+		"&Sec-MS-GEC-Version=" + secMSGECVersion
+	headers := wsHeaders()
+	headers.Set("Cookie", "muid="+muid()+";")
+
+	conn, resp, err := c.dialer().DialContext(ctx, url, headers)
+	if err == nil {
+		return conn, nil
+	}
+	if resp != nil {
+		resp.Body.Close()
+		if retry && resp.StatusCode == http.StatusForbidden {
+			if skewErr := c.adjustSkewFrom(resp); skewErr != nil {
+				return nil, fmt.Errorf("websocket dial: %w", skewErr)
+			}
+			return c.dialSpeech(ctx, false)
+		}
+		return nil, fmt.Errorf("websocket dial: upstream status %d: %w", resp.StatusCode, err)
+	}
+	return nil, fmt.Errorf("websocket dial: %w", err)
 }
 
 // splitHeaderBlock separates a "Key:value\r\n...\r\n\r\nbody" frame.
@@ -364,7 +388,10 @@ func (c *Client) dialer() *websocket.Dialer {
 }
 
 func (c *Client) token() string {
-	ts := float64(time.Now().Add(c.ClockSkew).UnixNano()) / 1e9
+	c.clockMu.RLock()
+	skew := c.ClockSkew
+	c.clockMu.RUnlock()
+	ts := float64(time.Now().Add(skew).UnixNano()) / 1e9
 	return drm.Generate(ts)
 }
 
@@ -379,7 +406,9 @@ func (c *Client) adjustSkewFrom(resp *http.Response) error {
 	if err != nil {
 		return fmt.Errorf("403 with unparsable server date %q: %w", date, err)
 	}
+	c.clockMu.Lock()
 	c.ClockSkew = time.Until(server)
+	c.clockMu.Unlock()
 	return nil
 }
 

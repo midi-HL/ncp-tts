@@ -34,7 +34,7 @@ func RegisterTools(srv *Server, h *TTSHandler) {
 				},
 				"voice": map[string]any{
 					"type":        "string",
-					"description": "Voice short name, e.g. zh-CN-XiaoxiaoNeural. Defaults to en-US-EmmaMultilingualNeural.",
+					"description": "Voice short name. Defaults to " + tts.DefaultVoice + ".",
 				},
 				"rate": map[string]any{
 					"type":        "string",
