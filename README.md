@@ -13,7 +13,7 @@
 - `tts_speak` —— 给一段文字，拿回一个 MP3 文件（或内联 base64）
 - `tts_list_voices` —— 查可用音色，可按 `zh-CN` 这类语言前缀过滤
 
-默认通过 **stdio** 提供 MCP 服务。需要让局域网内的设备调用时，用 `--listen` 启动 HTTP 模式。
+直接启动即可同时提供 **stdio MCP 服务**和 **HTTP API**，API 默认监听 `0.0.0.0:8000`，局域网内的设备可直接调用。
 
 ---
 
@@ -68,27 +68,31 @@ selftest ok
 
 Windows 上 `command` 写 `.exe` 的绝对路径，路径用双反斜杠或正斜杠。
 
-`--out` 不给的话默认写系统临时目录。
+`--out` 不给的话默认写系统临时目录。MCP 客户端启动进程时也会默认开启 API；若另一个实例已占用端口，可用 `--listen 0.0.0.0:8001` 更换端口，或给额外的 MCP 实例传入 `--listen=` 关闭 API。
 
 ---
 
 ## 在局域网使用 OpenAI 兼容 API
 
-在 Windows 上用 PowerShell 启动：
+直接启动即可，默认同时运行 MCP 和 API，无需添加参数。在 Windows 上用 PowerShell 启动：
 
 ```powershell
-.\ncp-tts-windows-amd64.exe --listen 0.0.0.0:8000
+.\ncp-tts-windows-amd64.exe
 ```
 
 在 Linux 上启动：
 
 ```bash
-./ncp-tts-linux-amd64 --listen 0.0.0.0:8000
+./ncp-tts-linux-amd64
 ```
 
-客户端的 Base URL 填 `http://<运行服务的电脑的局域网 IP>:8000/v1`，同一台电脑也可以用 `http://127.0.0.1:8000/v1`。HTTP 接口不检查 API Key：可以省略 `Authorization`，客户端要求填 Key 时随便填一个非空值即可。只想在本机使用时，可监听 `127.0.0.1:8000`。
+客户端的 Base URL 填 `http://<运行服务的电脑的局域网 IP>:8000/v1`，同一台电脑也可以用 `http://127.0.0.1:8000/v1`。HTTP 接口不检查 API Key：可以省略 `Authorization`，客户端要求填 Key 时随便填一个非空值即可。
 
-`--listen` 启动的是独立的 HTTP 服务。若同时需要 MCP，由 MCP 客户端另起一个不带 `--listen` 的进程。
+`--listen` 仅用于修改监听地址，例如 `--listen 0.0.0.0:8001` 更换端口，或 `--listen 127.0.0.1:8000` 只接受本机请求；`--listen=` 关闭 API，仅运行 MCP。若端口被占用，程序会立即报错并退出，请更换端口后启动。
+
+单独运行时，stdin 未收到 MCP 输入就关闭也会保持 API 运行；由 MCP 客户端使用过 stdin 后，客户端关闭 stdin 会让整个进程退出，API 一并停止。按 Ctrl+C 也会停止服务。
+
+`--version` 和 `--selftest` 只执行版本查询或自检，不启动 MCP 或 API，也不占用监听端口。
 
 | 接口 | 用途 |
 |---|---|
